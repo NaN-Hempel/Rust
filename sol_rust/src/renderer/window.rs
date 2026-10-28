@@ -12,11 +12,10 @@
 //   T, or clicking the panel (not its buttons): show or hide the time panel
 //   hover over a body or its orbit to see its name
 
-use std::num::NonZeroU32;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use softbuffer::{Context, Surface};
+use pixels::{wgpu, Pixels, PixelsBuilder, SurfaceTexture};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -104,8 +103,11 @@ struct App {
     hovered: Option<usize>,
     following: Option<usize>,
     // Created in resumed(), once the event loop is running.
-    window: Option<Rc<Window>>,
-    surface: Option<Surface<Rc<Window>, Rc<Window>>>,
+    // The frame is drawn into a pixel buffer, which the GPU puts on screen (much faster than
+    // having the CPU hand it to macOS). buffer_size is its size, which follows the window's.
+    window: Option<Arc<Window>>,
+    pixels: Option<Pixels<'static>>,
+    buffer_size: (u32, u32),
 }
 
 impl App {
@@ -136,19 +138,25 @@ impl App {
         }
         let physics = physics_start.elapsed();
 
-        let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else {
+        let (Some(window), Some(pixels)) = (&self.window, &mut self.pixels) else {
             return;
         };
         let size = window.inner_size();
-        let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
+        if size.width == 0 || size.height == 0 {
             return; // minimised
-        };
-        surface.resize(width, height).expect("failed to resize surface");
+        }
+        if self.buffer_size != (size.width, size.height) {
+            pixels.resize_surface(size.width, size.height).expect("failed to resize surface");
+            pixels.resize_buffer(size.width, size.height).expect("failed to resize pixel buffer");
+            self.buffer_size = (size.width, size.height);
+        }
         let ui_scale = window.scale_factor().round().max(1.0) as i64;
 
         let render_start = Instant::now();
-        let mut buffer = surface.buffer_mut().expect("failed to get pixel buffer");
-        let mut canvas = Canvas::new(&mut buffer, size.width, size.height);
+        // The buffer is in BGRA byte order, which on a little-endian machine is the 0x00RRGGBB
+        // u32 the canvas draws with, so it can draw straight into it.
+        let buffer: &mut [u32] = bytemuck::cast_slice_mut(pixels.frame_mut());
+        let mut canvas = Canvas::new(buffer, size.width, size.height);
         self.hovered = draw::draw_frame(&mut canvas, &self.camera, &self.simulation.planets, &self.trails, self.cursor, ui_scale);
         let margin = PANEL_MARGIN * ui_scale;
         let panel = if self.show_controls { CONTROLS } else { CONTROLS_HINT };
@@ -171,7 +179,7 @@ impl App {
         let render = render_start.elapsed();
 
         let present_start = Instant::now();
-        buffer.present().expect("failed to present frame");
+        pixels.render().expect("failed to present frame");
         self.stats.record(physics, render, present_start.elapsed());
     }
 
@@ -290,9 +298,20 @@ impl ApplicationHandler for App {
         // The body count tells apart windows started with different numbers of test particles.
         let title = format!("Solar system ({} bodies)", thousands(self.simulation.planets.len()));
         let attributes = Window::default_attributes().with_title(title);
-        let window = Rc::new(event_loop.create_window(attributes).expect("failed to create window"));
-        let context = Context::new(window.clone()).expect("failed to create graphics context");
-        self.surface = Some(Surface::new(&context, window.clone()).expect("failed to create surface"));
+        let window = Arc::new(event_loop.create_window(attributes).expect("failed to create window"));
+        let size = window.inner_size();
+        let pixels = PixelsBuilder::new(size.width, size.height, SurfaceTexture::new(size.width, size.height, window.clone()))
+            .texture_format(wgpu::TextureFormat::Bgra8UnormSrgb)
+            // The canvas leaves the alpha byte at 0: copy pixels as they are, onto an opaque window.
+            .blend_state(wgpu::BlendState::REPLACE)
+            .alpha_mode(wgpu::CompositeAlphaMode::Opaque)
+            // Frames are already paced by about_to_wait(); don't also wait for the screen, so the
+            // performance panel's Present time is the work, not the wait.
+            .enable_vsync(false)
+            .build()
+            .expect("failed to set up GPU drawing");
+        self.pixels = Some(pixels);
+        self.buffer_size = (size.width, size.height);
         self.window = Some(window);
     }
 
@@ -386,7 +405,8 @@ pub fn run(simulation: Simulation) {
         hovered: None,
         following: None,
         window: None,
-        surface: None,
+        pixels: None,
+        buffer_size: (0, 0),
     };
     event_loop.run_app(&mut app).expect("event loop failed");
 }
