@@ -13,7 +13,6 @@ pub const TEST_PARTICLE_MASS: f64 = 1.0e16;
 // Represents the state of the simulation, including positions, velocities, and masses of celestial bodies.
 // The massive bodies all take the same step, dt; the test particles take steps of their own
 // (see particles.rs).
-#[derive(Clone)]
 pub struct Simulation {
     pub planets: Vec<Planet>,
     // Steps for run_simulation(), which only the tests use; the window steps every frame instead.
@@ -65,6 +64,50 @@ impl Simulation {
     pub fn sync(&mut self) {
         self.particles.sync(&mut self.planets);
     }
+
+    // Simulated seconds so far.
+    pub fn time(&self) -> f64 {
+        self.particles.time()
+    }
+
+    // Whether a snapshot can be taken now (see Particles::at_sync_point).
+    pub fn at_sync_point(&self) -> bool {
+        self.particles.at_sync_point()
+    }
+
+    // Saves the simulation into `snapshot`, reusing its memory. Only at a sync point.
+    pub fn snapshot_into(&self, snapshot: &mut Snapshot) {
+        debug_assert!(self.at_sync_point(), "snapshots can only be taken at sync points");
+        snapshot.states.clear();
+        snapshot.states.extend(self.planets.iter().map(|p| (p.position, p.velocity)));
+        self.particles.levels_into(&mut snapshot.levels);
+        snapshot.step = self.particles.step();
+        snapshot.time = self.time();
+    }
+
+    // Puts the simulation back exactly as it was when `snapshot` was taken.
+    pub fn restore(&mut self, snapshot: &Snapshot) {
+        for (planet, &(position, velocity)) in self.planets.iter_mut().zip(&snapshot.states) {
+            planet.position = position;
+            planet.velocity = velocity;
+        }
+        for (k, &i) in self.massive.iter().enumerate() {
+            self.positions[k] = self.planets[i].position;
+            self.velocities[k] = self.planets[i].velocity;
+        }
+        self.particles.restore(snapshot.step, snapshot.time, &snapshot.levels, &self.mu, &self.positions, &self.velocities, &self.planets);
+    }
+}
+
+// A saved moment of a simulation, for jumping back in time: every body's position and velocity
+// and each test particle's step length, taken at a sync point, where that is all it takes to
+// carry on exactly. About 100 bytes per body, rather than a copy of the whole simulation.
+#[derive(Clone, Default)]
+pub struct Snapshot {
+    states: Vec<(Vec3, Vec3)>,
+    levels: Vec<u8>,
+    step: u64,
+    pub time: f64,
 }
 
 // Advances the massive bodies by dt seconds, using a fourth-order Yoshida step, and steps any
@@ -100,6 +143,7 @@ pub fn run_simulation(sim: &mut Simulation) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::code::particles::MAX_LEVEL;
     use crate::data::planets::{get_planets, jupiter_trojans, AU};
     use crate::code::physics::orbital_state;
 
@@ -256,6 +300,33 @@ mod tests {
     // difference in the orbits.
     const MASSIVE_STEP_TOLERANCE: f64 = 5.0e-6;
     const PARTICLE_STEP_TOLERANCE: f64 = 5.0e-6;
+
+    // Restoring a snapshot and running on gives exactly the same result, to the last bit, as
+    // never having stopped: through particles changing step length, sync points and steps of
+    // different lengths.
+    #[test]
+    fn snapshots_restore_exactly() {
+        let mut bodies = get_planets();
+        let trojans = jupiter_trojans(&bodies, 50);
+        bodies.extend(trojans);
+        let mut sim = new_simulation(bodies, 0, 300.0);
+        for _ in 0..2 * MAX_LEVEL {
+            update_simulation(&mut sim, 300.0);
+        }
+        assert!(sim.at_sync_point());
+        let mut snapshot = Snapshot::default();
+        sim.snapshot_into(&mut snapshot);
+        let run_on = |sim: &mut Simulation| {
+            for k in 0..5000 {
+                update_simulation(sim, if k % 3 == 0 { 120.0 } else { 300.0 });
+            }
+            sim.sync();
+            sim.planets.iter().map(|p| (p.position, p.velocity)).collect::<Vec<_>>()
+        };
+        let first = run_on(&mut sim);
+        sim.restore(&snapshot);
+        assert_eq!(first, run_on(&mut sim));
+    }
 
     fn time_per_frame(mut sim: Simulation) -> f64 {
         // Long enough to include several of the particles' longest steps, which come in bursts.

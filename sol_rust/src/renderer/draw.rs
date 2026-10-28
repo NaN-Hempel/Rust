@@ -3,6 +3,7 @@
 
 use crate::code::math::{Vec3, PI};
 use crate::data::planets::Planet;
+use crate::renderer::rings;
 use crate::renderer::text;
 use crate::renderer::trails::Trails;
 
@@ -93,6 +94,11 @@ impl Projector {
         let up = y * self.cos_pitch + p.z * self.sin_pitch;
         let depth = p.z * self.cos_pitch - y * self.sin_pitch;
         (self.centre.0 + x * self.scale, self.centre.1 - up * self.scale, depth)
+    }
+
+    // Pixels per metre.
+    pub fn scale(&self) -> f64 {
+        self.scale
     }
 }
 
@@ -244,7 +250,9 @@ pub fn draw_frame(canvas: &mut Canvas, camera: &Camera, planets: &[Planet], trai
         .map(|p| {
             let (x, y, depth) = projector.project(p.position);
             let radius = if is_swarm(p) { SWARM_DOT_RADIUS } else { dot_radius(p.radius) };
-            (x, y, depth, radius * ui_scale as f64)
+            // Zoomed in far enough, a body is drawn at its true size, if that is bigger.
+            let true_radius = p.radius * 1000.0 * projector.scale();
+            (x, y, depth, (radius * ui_scale as f64).max(true_radius))
         })
         .collect();
     let visible: Vec<bool> = planets
@@ -305,12 +313,22 @@ pub fn draw_frame(canvas: &mut Canvas, camera: &Camera, planets: &[Planet], trai
         }
     }
 
+    // Saturn's rings, if Saturn is there: the far half behind its dot, the near half in front.
+    let saturn = planets.iter().position(|p| p.name == "Saturn");
+    let pole = saturn.and_then(|i| planets[i].parent.map(|sun| rings::saturn_pole(&planets[i], &planets[sun])));
     for &i in &order {
         let (x, y, _, r) = screen[i];
+        let ring_pole = pole.filter(|_| Some(i) == saturn);
+        if let Some(pole) = ring_pole {
+            rings::draw(canvas, &projector, planets[i].position, pole, r, rings::Half::Far);
+        }
         if is_swarm(&planets[i]) {
             canvas.blend_circle(x, y, r, colour(&planets[i]), SWARM_DOT_OPACITY);
         } else {
             canvas.fill_circle(x, y, r, colour(&planets[i]));
+        }
+        if let Some(pole) = ring_pole {
+            rings::draw(canvas, &projector, planets[i].position, pole, r, rings::Half::Near);
         }
     }
 

@@ -21,8 +21,8 @@ const DAY: f64 = 86_400.0;
 pub const TROJAN_TAIL: f64 = 0.05;
 
 pub struct Trails {
-    // Each body's recorded positions, oldest first, with the simulated time of each.
-    history: Vec<VecDeque<(f64, Vec3)>>,
+    // Each body's recorded positions.
+    history: Vec<Trail>,
     // For each body: seconds between points, and how far back its trail reaches (0 for no trail).
     interval: Vec<f64>,
     span: Vec<f64>,
@@ -54,7 +54,7 @@ impl Trails {
                 (period / POINTS_PER_ORBIT, span)
             })
             .unzip();
-        Trails { history: vec![VecDeque::new(); planets.len()], interval, span, time: 0.0, next: vec![0.0; planets.len()] }
+        Trails { history: (0..planets.len()).map(|_| Trail::default()).collect(), interval, span, time: 0.0, next: vec![0.0; planets.len()] }
     }
 
     // Moves the trails' clock on by dt seconds, adds the current position of every body that is
@@ -72,11 +72,8 @@ impl Trails {
             self.next[i] = (self.next[i] + self.interval[i]).max(self.time);
             let origin = planet.parent.map_or(Vec3::ZERO, |p| planets[p].position);
             let trail = &mut self.history[i];
-            trail.push_back((self.time, planet.position - origin));
-            let oldest = self.time - self.span[i];
-            while trail.front().is_some_and(|&(t, _)| t < oldest) {
-                trail.pop_front();
-            }
+            trail.push(self.time, planet.position - origin);
+            trail.drop_before(self.time - self.span[i]);
         }
     }
 
@@ -84,9 +81,7 @@ impl Trails {
     // when the simulation jumps back. Points older than that are kept.
     pub fn rewind(&mut self, time: f64) {
         for trail in &mut self.history {
-            while trail.back().is_some_and(|&(t, _)| t > time) {
-                trail.pop_back();
-            }
+            trail.drop_after(time);
         }
         self.time = time;
         self.next.fill(time);
@@ -96,8 +91,57 @@ impl Trails {
     // and ending at the body itself so the trail doesn't stop short of it.
     pub fn points<'a>(&'a self, i: usize, planets: &[Planet]) -> impl Iterator<Item = Vec3> + 'a {
         let origin = planets[i].parent.map_or(Vec3::ZERO, |p| planets[p].position);
-        let current = (!self.history[i].is_empty()).then_some(planets[i].position);
-        self.history[i].iter().map(move |&(_, p)| p + origin).chain(current)
+        let points = &self.history[i].points;
+        let current = (!points.is_empty()).then_some(planets[i].position);
+        points.iter().map(move |p| Vec3::new(p.offset[0] as f64, p.offset[1] as f64, p.offset[2] as f64) + origin).chain(current)
+    }
+}
+
+// One body's trail: its points, oldest first, and the simulated times of the oldest and newest.
+// To take half the memory, points are stored in single precision. A position relative to the
+// parent is then accurate to about 1 part in 17 million: a few hundred km even 45 AU from the
+// Sun, far below a pixel at any zoom that shows more than one of a trail's points. Each point's time
+// is kept as the gap since the point before it, which single precision holds to well under a
+// second, as the gaps are no longer than the interval between points.
+#[derive(Default)]
+struct Trail {
+    points: VecDeque<Point>,
+    first: f64,
+    last: f64,
+}
+
+#[derive(Clone, Copy)]
+struct Point {
+    gap: f32,
+    offset: [f32; 3],
+}
+
+impl Trail {
+    fn push(&mut self, time: f64, offset: Vec3) {
+        if self.points.is_empty() {
+            self.first = time;
+            self.last = time;
+        }
+        self.points.push_back(Point { gap: (time - self.last) as f32, offset: [offset.x as f32, offset.y as f32, offset.z as f32] });
+        self.last = time;
+    }
+
+    // Drops points recorded before `time`.
+    fn drop_before(&mut self, time: f64) {
+        while self.first < time && self.points.pop_front().is_some() {
+            match self.points.front() {
+                Some(next) => self.first += next.gap as f64,
+                None => break,
+            }
+        }
+    }
+
+    // Drops points recorded after `time`.
+    fn drop_after(&mut self, time: f64) {
+        while self.last > time {
+            let Some(point) = self.points.pop_back() else { break };
+            self.last -= point.gap as f64;
+        }
     }
 }
 
@@ -118,7 +162,32 @@ mod tests {
         }
         let i = s.planets.iter().position(|p| p.name == name).unwrap();
         let trail = &trails.history[i];
-        (trail.len(), (trails.time - trail.front().unwrap().0) / DAY)
+        (trail.points.len(), (trails.time - trail.first) / DAY)
+    }
+
+    // Points 45 AU out (a Kuiper belt orbit) come back within a few hundred km, and their times
+    // are still exact enough to trim the right points off either end.
+    #[test]
+    fn compact_points_are_accurate() {
+        let (radius, gap) = (45.0 * 1.495_978_707e11, 1.9e7); // a point every 0.6 years
+        let position = |k: usize| {
+            let angle = k as f64 * 0.0126;
+            Vec3::new(radius * angle.cos(), radius * angle.sin(), 1.0e11)
+        };
+        let mut trail = Trail::default();
+        for k in 0..1000 {
+            trail.push(k as f64 * gap, position(k));
+        }
+        for (k, p) in trail.points.iter().enumerate() {
+            let stored = Vec3::new(p.offset[0] as f64, p.offset[1] as f64, p.offset[2] as f64);
+            assert!((stored - position(k)).norm() < 400_000.0, "point {} is {} km off", k, (stored - position(k)).norm() / 1000.0);
+        }
+        trail.drop_after(500.0 * gap + 1.0);
+        assert_eq!(trail.points.len(), 501);
+        assert!((trail.last - 500.0 * gap).abs() < 1.0);
+        trail.drop_before(100.0 * gap - 1.0);
+        assert_eq!(trail.points.len(), 401);
+        assert!((trail.first - 100.0 * gap).abs() < 1.0);
     }
 
     // Earth's trail covers one year in about 500 points, whatever the step length.

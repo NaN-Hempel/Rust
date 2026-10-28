@@ -26,7 +26,6 @@ const STEPS_PER_ORBIT: f64 = 200.0;
 // Fractions of a step at which Yoshida's three kicks happen: the sum of the drifts before each.
 const KICK_TIME: [f64; 3] = [DRIFT[0], DRIFT[0] + DRIFT[1], DRIFT[0] + DRIFT[1] + DRIFT[2]];
 
-#[derive(Clone)]
 pub struct Particles {
     // Index into planets of each particle.
     pub index: Vec<usize>,
@@ -136,6 +135,53 @@ impl Particles {
             planets[i].velocity = self.velocity[k] + self.acc[k] * t;
         }
     }
+
+    // Base steps taken, and the simulated time.
+    pub fn step(&self) -> u64 {
+        self.step
+    }
+
+    pub fn time(&self) -> f64 {
+        self.time
+    }
+
+    // Whether every particle has just stepped (every MAX_LEVEL base steps, all step lengths come
+    // due together). Then nothing from before is needed to carry on: the bodies' positions and
+    // velocities and each particle's step length are enough to restore the simulation exactly.
+    pub fn at_sync_point(&self) -> bool {
+        self.step % MAX_LEVEL == 0
+    }
+
+    // Fills out with each particle's bucket (log2 of its step length), in index order.
+    pub fn levels_into(&self, out: &mut Vec<u8>) {
+        out.clear();
+        out.resize(self.index.len(), 0);
+        for (level, bucket) in self.buckets.iter().enumerate() {
+            for &k in bucket {
+                out[k] = level as u8;
+            }
+        }
+    }
+
+    // Puts the particles back as they were at a sync point: at base step `step` and simulated
+    // time `time`, in the buckets `levels`, with their states as in planets. mu, positions and
+    // velocities are the massive bodies' at that moment. Each particle steps on its own, so the
+    // order within the rebuilt buckets doesn't matter.
+    pub fn restore(&mut self, step: u64, time: f64, levels: &[u8], mu: &[f64], positions: &[Vec3], velocities: &[Vec3], planets: &[Planet]) {
+        self.step = step;
+        self.time = time;
+        self.history.record(step, time, positions, velocities);
+        for bucket in &mut self.buckets {
+            bucket.clear();
+        }
+        for (k, &i) in self.index.iter().enumerate() {
+            self.position[k] = planets[i].position;
+            self.velocity[k] = planets[i].velocity;
+            self.acc[k] = pull(mu, positions, self.position[k]);
+            self.last_time[k] = time;
+            self.buckets[levels[k] as usize].push(k);
+        }
+    }
 }
 
 // The bucket (log2 of the step length in base steps) for a particle at x, at base step `step`,
@@ -160,7 +206,6 @@ fn level_for(mu: &[f64], positions: &[Vec3], x: Vec3, max_dt: f64, step: u64) ->
 
 // The massive bodies' positions and velocities at the end of each of the last MAX_LEVEL base
 // steps, in a ring buffer indexed by step number.
-#[derive(Clone)]
 struct History {
     massive: usize,
     times: Vec<f64>,

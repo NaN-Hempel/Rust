@@ -22,7 +22,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::code::sim::{self, Simulation};
+use crate::code::sim::{self, Simulation, Snapshot};
 use crate::renderer::draw::{self, Camera, Canvas};
 use crate::renderer::stats::Stats;
 use crate::renderer::time::{Button, TimeControl, BUTTONS};
@@ -37,8 +37,9 @@ const PHYSICS_BUDGET: Duration = Duration::from_millis(12);
 const DRAG_SPEED: f64 = 0.005;
 // The simulation is saved this often (in frames), and before each jump, so it can jump back:
 // time can't run backwards, so a jump back restores the newest snapshot from before the moment
-// it jumps to, and works forward from there. The oldest snapshots are dropped beyond the limit,
-// which is as far back as it can jump.
+// it jumps to, and works forward from there. Snapshots can only be taken at sync points (see
+// sim::Snapshot), so what is saved is the state at the last one, at most a few frames earlier.
+// The oldest snapshots are dropped beyond the limit, which is as far back as it can jump.
 const SNAPSHOT_EVERY: u32 = 60;
 const MAX_SNAPSHOTS: usize = 20;
 // A press and release closer together than this (in pixels) is a click rather than a drag.
@@ -78,11 +79,12 @@ struct App {
     camera: Camera,
     trails: Trails,
     time: TimeControl,
-    // Simulated seconds so far, and the steps taken in the last frame that wasn't paused: (number, length).
-    sim_time: f64,
+    // The steps taken in the last frame that wasn't paused: (number, length).
     last_steps: (usize, f64),
-    // Saved (simulated time, simulation) pairs, oldest first, and frames since the last was saved.
-    snapshots: Vec<(f64, Simulation)>,
+    // Saved moments, oldest first; the state at the last sync point, kept up to date as the
+    // simulation runs, ready to be saved; and frames since a snapshot was last saved.
+    snapshots: Vec<Snapshot>,
+    last_sync: Snapshot,
     frames_since_snapshot: u32,
     show_controls: bool,
     // Where the panels (or their hints) and the time panel's buttons were drawn last frame.
@@ -117,20 +119,18 @@ impl App {
             let (steps, dt) = self.time.steps(FRAME_TIME.as_secs_f64(), self.simulation.dt);
             let mut taken = 0;
             while taken < steps {
-                sim::update_simulation(&mut self.simulation, dt);
-                self.trails.record(&self.simulation.planets, dt);
+                self.step(dt);
                 taken += 1;
                 if physics_start.elapsed() > PHYSICS_BUDGET {
                     break;
                 }
             }
             self.time.taken(taken, steps);
-            self.sim_time += dt * taken as f64;
             self.last_steps = (taken, dt);
             self.simulation.sync();
             self.frames_since_snapshot += 1;
             if self.frames_since_snapshot >= SNAPSHOT_EVERY {
-                self.snapshot();
+                self.save_snapshot();
             }
         }
         if let Some(i) = self.following {
@@ -166,7 +166,7 @@ impl App {
         self.stats_panel = draw::draw_panel(&mut canvas, x, margin, &lines, ui_scale);
 
         // The time panel, in the bottom-left corner, with its buttons on the last line.
-        let lines = if self.show_time { self.time.panel_lines(self.sim_time).to_vec() } else { TIME_HINT.iter().map(|l| l.to_string()).collect() };
+        let lines = if self.show_time { self.time.panel_lines(self.simulation.time()).to_vec() } else { TIME_HINT.iter().map(|l| l.to_string()).collect() };
         let y = canvas.height - draw::panel_size(&lines, ui_scale).1 - margin;
         self.time_panel = draw::draw_panel(&mut canvas, margin, y, &lines, ui_scale);
         self.buttons = BUTTONS.map(|(button, from, to)| {
@@ -183,27 +183,38 @@ impl App {
         self.stats.record(physics, render, present_start.elapsed());
     }
 
-    fn snapshot(&mut self) {
-        if self.snapshots.len() == MAX_SNAPSHOTS {
-            self.snapshots.remove(0);
+    // One simulation step of dt seconds, with its trail points, keeping the last sync point's
+    // state up to date.
+    fn step(&mut self, dt: f64) {
+        sim::update_simulation(&mut self.simulation, dt);
+        self.trails.record(&self.simulation.planets, dt);
+        if self.simulation.at_sync_point() {
+            self.simulation.snapshot_into(&mut self.last_sync);
         }
-        self.snapshots.push((self.sim_time, self.simulation.clone()));
+    }
+
+    // Saves the last sync point's state, unless it has been saved already.
+    fn save_snapshot(&mut self) {
+        if self.snapshots.last().is_none_or(|s| s.time < self.last_sync.time) {
+            if self.snapshots.len() == MAX_SNAPSHOTS {
+                self.snapshots.remove(0);
+            }
+            self.snapshots.push(self.last_sync.clone());
+        }
         self.frames_since_snapshot = 0;
     }
 
     // Takes `steps` steps of dt seconds without drawing them, recording trails as it goes.
     fn run_unseen(&mut self, steps: usize, dt: f64) {
         for _ in 0..steps {
-            sim::update_simulation(&mut self.simulation, dt);
-            self.trails.record(&self.simulation.planets, dt);
+            self.step(dt);
         }
-        self.sim_time += dt * steps as f64;
         self.simulation.sync();
     }
 
     // Jumps a second's worth ahead at the current speed, computing every step.
     fn jump_ahead(&mut self) {
-        self.snapshot();
+        self.save_snapshot();
         let (steps, dt) = self.time.jump(self.simulation.dt);
         self.run_unseen(steps, dt);
     }
@@ -212,15 +223,19 @@ impl App {
     // further back than the snapshots go.
     fn jump_back(&mut self) {
         let (steps, dt) = self.time.jump(self.simulation.dt);
-        let target = (self.sim_time - steps as f64 * dt).max(0.0);
-        // Snapshots after the target belong to the future being left; drop them.
-        let Some(k) = self.snapshots.iter().rposition(|&(t, _)| t <= target).or((!self.snapshots.is_empty()).then_some(0)) else {
-            return;
-        };
-        self.snapshots.truncate(k + 1);
-        let (time, simulation) = self.snapshots[k].clone();
-        self.simulation = simulation;
-        self.sim_time = time;
+        let target = (self.simulation.time() - steps as f64 * dt).max(0.0);
+        // The newest saved state at or before the target: the last sync point's if it is early
+        // enough (it is the newest of all), or else a snapshot. Snapshots after the target belong
+        // to the future being left; drop them.
+        if self.last_sync.time > target {
+            let Some(k) = self.snapshots.iter().rposition(|s| s.time <= target).or((!self.snapshots.is_empty()).then_some(0)) else {
+                return;
+            };
+            self.snapshots.truncate(k + 1);
+            self.last_sync.clone_from(&self.snapshots[k]);
+        }
+        self.simulation.restore(&self.last_sync);
+        let time = self.last_sync.time;
         self.trails.rewind(time);
         let remaining = target - time;
         if remaining > 0.0 {
@@ -382,13 +397,15 @@ impl ApplicationHandler for App {
 // takes; slower speeds take shorter ones.
 pub fn run(simulation: Simulation) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
+    let mut last_sync = Snapshot::default();
+    simulation.snapshot_into(&mut last_sync);
     let mut app = App {
         camera: Camera::fit(&simulation.planets),
         trails: Trails::new(&simulation.planets),
         time: TimeControl::new(),
-        sim_time: 0.0,
         last_steps: (0, simulation.dt),
-        snapshots: vec![(0.0, simulation.clone())],
+        snapshots: vec![last_sync.clone()],
+        last_sync,
         frames_since_snapshot: 0,
         simulation,
         show_controls: true,
