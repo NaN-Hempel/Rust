@@ -1,0 +1,22 @@
+[package]
+name = "sol_rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+code = "0.0.1"
+csv = "1.4.0"
+font8x8 = "0.3.1"
+serde = { version = "1.0.229", features = ["derive"] }
+softbuffer = "0.4.8"
+winit = "0.30.13"
+
+[profile.dev]
+opt-level = 1            # makes debug builds fast enough for a real-time simulation
+
+[profile.dev.package."*"]
+opt-level = 3            # dependencies fully optimised; they rarely recompile
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
