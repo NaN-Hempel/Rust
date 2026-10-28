@@ -2,6 +2,10 @@
 // Every frame, the window advances the simulation by the speed times the frame's length, in
 // steps no longer than the simulation's own dt: slow speeds take one short step per frame, so
 // motion stays smooth, and fast speeds take many full-length steps.
+// The time panel shows the simulated date: as if the simulation began when the program started,
+// in local time.
+
+use chrono::{DateTime, Local, TimeDelta};
 
 const MINUTE: f64 = 60.0;
 const HOUR: f64 = 3600.0;
@@ -45,11 +49,14 @@ pub struct TimeControl {
     // The fraction of each frame's steps the physics has had time for, smoothed over a few
     // frames: 1 normally, less when the speed is more than the computer can keep up with.
     keeping_up: f64,
+    // The real date and time the simulation counts on from.
+    start: DateTime<Local>,
 }
 
 impl TimeControl {
+    // Starts the simulated calendar now.
     pub fn new() -> Self {
-        TimeControl { speed: DEFAULT_SPEED, paused: false, keeping_up: 1.0 }
+        TimeControl { speed: DEFAULT_SPEED, paused: false, keeping_up: 1.0, start: Local::now() }
     }
 
     pub fn press(&mut self, button: Button) {
@@ -84,6 +91,14 @@ impl TimeControl {
         self.keeping_up += 0.2 * (taken as f64 / wanted as f64 - self.keeping_up);
     }
 
+    // The date and time `elapsed` simulated seconds after the start, in local time (with summer
+    // time where it applies on that date).
+    fn date(&self, elapsed: f64) -> String {
+        TimeDelta::try_milliseconds((elapsed * 1000.0) as i64)
+            .and_then(|delta| self.start.checked_add_signed(delta))
+            .map_or_else(|| "beyond the calendar".to_string(), |date| date.with_timezone(&Local).format("%-d %b %Y  %H:%M:%S").to_string())
+    }
+
     // The time panel's text, given the simulated seconds so far. The buttons are on the last line.
     pub fn panel_lines(&self, elapsed: f64) -> [String; 2] {
         let status = if self.paused {
@@ -94,7 +109,7 @@ impl TimeControl {
             String::new()
         };
         [
-            format!("Elapsed  {}{}", duration(elapsed), status),
+            format!("{}{}", self.date(elapsed), status),
             format!(" ⏪  {}  ⏩   {}", if self.paused { '▶' } else { '‖' }, SPEEDS[self.speed].1),
         ]
     }
@@ -143,6 +158,17 @@ mod tests {
             time.press(Button::Slower);
         }
         assert_eq!(time.speed, 0);
+    }
+
+    // The date counts on from the start by the simulated time.
+    #[test]
+    fn date_counts_on_from_the_start() {
+        use chrono::TimeZone;
+        let start = Local.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+        let time = TimeControl { start, ..TimeControl::new() };
+        assert_eq!(time.date(0.0), "10 Jun 2026  12:00:00");
+        assert_eq!(time.date(DAY + 90.0), "11 Jun 2026  12:01:30");
+        assert_eq!(time.date(30.0 * DAY), "10 Jul 2026  12:00:00");
     }
 
     // The default is about a day per frame, the speed the simulation ran at before it had controls.

@@ -1,6 +1,7 @@
 // Opens a window and runs the simulation in it, drawing one frame about every 1/60 s.
 // Controls:
-//   drag with the left mouse button: rotate the view
+//   drag with the left mouse button, or hold W A S D: rotate the view (A and D turn it, W and S
+//   tilt it, each the same way as dragging in that direction)
 //   scroll wheel, or + / -: zoom
 //   click a body: follow it (and zoom to its moons, if it has any)
 //   up and down arrows (or the ⏩ and ⏪ buttons): speed time up or slow it down
@@ -19,7 +20,7 @@ use pixels::{wgpu, Pixels, PixelsBuilder, SurfaceTexture};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::code::sim::{self, Simulation, Snapshot};
@@ -33,8 +34,9 @@ const FRAME_TIME: Duration = Duration::from_micros(16_667);
 // does as many steps as fit in this time, so the window stays responsive, and the time panel
 // shows that the simulation is running slower than asked.
 const PHYSICS_BUDGET: Duration = Duration::from_millis(12);
-// Radians of rotation per pixel dragged.
+// Radians of rotation per pixel dragged, and per second while W, A, S or D is held.
 const DRAG_SPEED: f64 = 0.005;
+const KEY_ROTATION_SPEED: f64 = 1.2;
 // The simulation is saved this often (in frames), and before each jump, so it can jump back:
 // time can't run backwards, so a jump back restores the newest snapshot from before the moment
 // it jumps to, and works forward from there. Snapshots can only be taken at sync points (see
@@ -49,7 +51,7 @@ const CLICK_DISTANCE: f64 = 4.0;
 const CONTROLS: &[&str] = &[
     "Controls",
     "",
-    "Drag               rotate",
+    "Drag / W A S D     rotate",
     "Scroll / + -       zoom",
     "Click a body       follow it",
     "Hover              show name",
@@ -104,6 +106,10 @@ struct App {
     // The body under the cursor in the last frame, and the body the camera follows.
     hovered: Option<usize>,
     following: Option<usize>,
+    // Which of W, A, S and D are held, and when the last frame was drawn (they turn the view
+    // smoothly, by how long each frame took).
+    turn_keys: TurnKeys,
+    last_frame: Instant,
     // Created in resumed(), once the event loop is running.
     // The frame is drawn into a pixel buffer, which the GPU puts on screen (much faster than
     // having the CPU hand it to macOS). buffer_size is its size, which follows the window's.
@@ -114,6 +120,13 @@ struct App {
 
 impl App {
     fn redraw(&mut self) {
+        let now = Instant::now();
+        // At most a tenth of a second, so the view doesn't lurch after a long jump through time.
+        let seconds = now.duration_since(self.last_frame).as_secs_f64().min(0.1);
+        self.last_frame = now;
+        let (yaw, pitch) = self.turn_keys.direction();
+        self.camera.rotate(yaw * KEY_ROTATION_SPEED * seconds, pitch * KEY_ROTATION_SPEED * seconds);
+
         let physics_start = Instant::now();
         if !self.time.paused {
             let (steps, dt) = self.time.steps(FRAME_TIME.as_secs_f64(), self.simulation.dt);
@@ -286,6 +299,38 @@ fn thousands(n: usize) -> String {
     out
 }
 
+// Which of W, A, S and D are held. They are read by their position on the keyboard rather than
+// the letter they type, so they sit in the same place on any layout (Z Q S D on AZERTY).
+#[derive(Default)]
+struct TurnKeys {
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+}
+
+impl TurnKeys {
+    // Records a key going down or up. Returns whether it was one of the four.
+    fn set(&mut self, key: PhysicalKey, pressed: bool) -> bool {
+        let held = match key {
+            PhysicalKey::Code(KeyCode::KeyA) => &mut self.left,
+            PhysicalKey::Code(KeyCode::KeyD) => &mut self.right,
+            PhysicalKey::Code(KeyCode::KeyW) => &mut self.up,
+            PhysicalKey::Code(KeyCode::KeyS) => &mut self.down,
+            _ => return false,
+        };
+        *held = pressed;
+        true
+    }
+
+    // Which way to turn, as (yaw, pitch), each -1, 0 or 1: the same way as dragging the mouse in
+    // that direction (dragging right turns, dragging down tilts, by positive amounts).
+    fn direction(&self) -> (f64, f64) {
+        let axis = |minus: bool, plus: bool| plus as i32 as f64 - minus as i32 as f64;
+        (axis(self.left, self.right), axis(self.up, self.down))
+    }
+}
+
 fn inside((x, y, w, h): Rect, (px, py): (f64, f64)) -> bool {
     px >= x as f64 && px < (x + w) as f64 && py >= y as f64 && py < (y + h) as f64
 }
@@ -333,7 +378,11 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+            WindowEvent::KeyboardInput { event, .. } => {
+                let pressed = event.state == ElementState::Pressed;
+                if self.turn_keys.set(event.physical_key, pressed) || !pressed {
+                    return;
+                }
                 match event.logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
                     Key::Named(NamedKey::Space) => self.time.press(Button::Pause),
@@ -368,6 +417,8 @@ impl ApplicationHandler for App {
                 self.cursor = Some((position.x, position.y));
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
+            // Keys released while the window wasn't listening would otherwise stay held.
+            WindowEvent::Focused(false) => self.turn_keys = TurnKeys::default(),
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y as f64,
@@ -421,6 +472,8 @@ pub fn run(simulation: Simulation) {
         press: None,
         hovered: None,
         following: None,
+        turn_keys: TurnKeys::default(),
+        last_frame: Instant::now(),
         window: None,
         pixels: None,
         buffer_size: (0, 0),

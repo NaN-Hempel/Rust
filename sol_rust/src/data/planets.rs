@@ -68,16 +68,13 @@ struct Record {
 }
 
 // Returns every body that has enough data to place it, in the order they appear in the CSV.
-// Bodies without it are skipped, with a message on stderr.
+// Bodies without it are skipped (JUICE and Europa Clipper).
 pub fn get_planets() -> Vec<Planet> {
     let mut bodies: Vec<Planet> = Vec::new();
     for record in csv::Reader::from_reader(INIT_VALUES.as_bytes()).deserialize::<Record>() {
         let r = record.expect("invalid row in init_values.csv");
-        match initial_state(&r, &bodies) {
-            Some((parent, a, position, velocity)) => {
-                bodies.push(Planet::new(&r.name, &r.body_type, r.mass * EARTH_MASS, r.radius, a / 1000.0, parent, position, velocity));
-            }
-            None => eprintln!("Skipping {}: not enough orbital data", r.name),
+        if let Some((parent, a, position, velocity)) = initial_state(&r, &bodies) {
+            bodies.push(Planet::new(&r.name, &r.body_type, r.mass * EARTH_MASS, r.radius, a / 1000.0, parent, position, velocity));
         }
     }
     bodies
