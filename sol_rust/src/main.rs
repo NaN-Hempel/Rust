@@ -10,7 +10,7 @@ const DAY: f64 = 86_400.0; // seconds
 
 // Made-up test particles added by default; --trojans N and --kuiper N change them (0 for none).
 const DEFAULT_TROJANS: usize = 500;
-const DEFAULT_KUIPER: usize = 1500;
+const DEFAULT_KUIPER: usize = 3500;
 
 // The number given after `flag` on the command line (for example --trojans 200), or `default`
 // without it.
