@@ -16,6 +16,7 @@ use rand::RngExt;
 use crate::code::fncts::{mse, mse_gradient, Activation};
 use crate::code::math::{ones, random, Matrix};
 
+#[derive(Clone)]
 pub struct Layer {
     pub weights: Matrix, // outputs × inputs
     pub bias: Matrix,    // outputs × 1
@@ -39,6 +40,7 @@ pub struct Gradient {
     pub bias: Matrix,
 }
 
+#[derive(Clone)]
 pub struct Network {
     pub layers: Vec<Layer>,
 }
@@ -56,6 +58,40 @@ impl Network {
     pub fn predict(&self, input: &Matrix) -> Matrix {
         let (_, mut outputs) = self.forward(input);
         outputs.pop().unwrap()
+    }
+
+    // The output for a single sample, as a plain list of numbers.
+    pub fn decide(&self, input: &[f64]) -> Vec<f64> {
+        self.predict(&Matrix::from_column_slice(input.len(), 1, input)).as_slice().to_vec()
+    }
+
+    // Number of weights and biases in all the layers together.
+    pub fn param_count(&self) -> usize {
+        self.layers.iter().map(|layer| layer.weights.len() + layer.bias.len()).sum()
+    }
+
+    // Every weight and bias in one list, layer by layer (each layer's weights, then its bias).
+    // For training without gradients, as in evolution, where this list is the genome.
+    pub fn params(&self) -> Vec<f64> {
+        let mut params = Vec::with_capacity(self.param_count());
+        for layer in &self.layers {
+            params.extend_from_slice(layer.weights.as_slice());
+            params.extend_from_slice(layer.bias.as_slice());
+        }
+        params
+    }
+
+    // The reverse of params(): sets every weight and bias from one list, in the same order.
+    pub fn set_params(&mut self, params: &[f64]) {
+        assert_eq!(params.len(), self.param_count(), "wrong number of parameters");
+        let mut rest = params;
+        for layer in &mut self.layers {
+            for matrix in [&mut layer.weights, &mut layer.bias] {
+                let (mine, others) = rest.split_at(matrix.len());
+                matrix.copy_from_slice(mine);
+                rest = others;
+            }
+        }
     }
 
     pub fn loss(&self, input: &Matrix, target: &Matrix) -> f64 {

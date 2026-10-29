@@ -9,6 +9,8 @@ chrono = "0.4.45"
 csv = "1.4.0"
 font8x8 = "0.3.1"
 pixels = "0.17.2"
+rand = "0.10.3"
+rusty_neurons = { path = "../rusty_neurons" }
 serde = { version = "1.0.229", features = ["derive"] }
 winit = "0.30.13"
 

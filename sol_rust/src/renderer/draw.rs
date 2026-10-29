@@ -418,7 +418,9 @@ fn colour(planet: &Planet) -> u32 {
         _ => {}
     }
     let body_type = planet.body_type.as_str();
-    if body_type.starts_with("Moon") {
+    if body_type == "Probe" {
+        probe_colour(planet)
+    } else if body_type.starts_with("Moon") {
         0x00_B8_B0_A8
     } else if body_type == "Dwarf planet" {
         0x00_C8_A8_88
@@ -433,6 +435,18 @@ fn colour(planet: &Planet) -> u32 {
     } else {
         0x00_7C_E8_8A // spacecraft
     }
+}
+
+// Probes flown by evolved networks (see probe/) are numbered, the best first ("Probe 1 (best)"),
+// and each number gets its own colour, so their paths can be told apart. The best is white.
+const PROBE_COLOURS: [u32; 11] = [
+    0x00_FF_FF_FF, 0x00_FF_5C_8A, 0x00_5C_E1_FF, 0x00_FF_C8_3C, 0x00_9D_FF_5C, 0x00_C0_7C_FF,
+    0x00_FF_8C_42, 0x00_42_FF_C6, 0x00_FF_7C_E6, 0x00_B8_C8_FF, 0x00_E6_FF_70,
+];
+
+fn probe_colour(planet: &Planet) -> u32 {
+    let number: usize = planet.name.split(' ').nth(1).and_then(|n| n.parse().ok()).unwrap_or(1);
+    PROBE_COLOURS[(number.max(1) - 1) % PROBE_COLOURS.len()]
 }
 
 // Made-up bodies that come in swarms of hundreds (Jupiter trojans, the Kuiper belt). They are

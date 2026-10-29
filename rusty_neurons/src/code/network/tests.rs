@@ -54,3 +54,25 @@ fn learns_xor() {
     }
     assert_abs_diff_eq!(network.predict(&input), target, epsilon = 0.1);
 }
+
+#[test]
+fn params_round_trip() {
+    let mut rng = StdRng::seed_from_u64(3);
+    let network = Network::new(&[3, 5, 2], &[Activation::Tanh, Activation::Identity], &mut rng);
+    assert_eq!(network.param_count(), 3 * 5 + 5 + 5 * 2 + 2);
+    let mut copy = Network::new(&[3, 5, 2], &[Activation::Tanh, Activation::Identity], &mut rng);
+    copy.set_params(&network.params());
+    assert_eq!(copy.params(), network.params());
+    let input = random(3, 4, 1.0, &mut rng);
+    assert_eq!(copy.predict(&input), network.predict(&input));
+}
+
+#[test]
+fn set_params_changes_the_output() {
+    let mut rng = StdRng::seed_from_u64(5);
+    let mut network = Network::new(&[2, 3, 1], &[Activation::Tanh, Activation::Identity], &mut rng);
+    let before = network.decide(&[0.5, -0.5]);
+    let params: Vec<f64> = network.params().iter().map(|p| p + 0.1).collect();
+    network.set_params(&params);
+    assert_ne!(network.decide(&[0.5, -0.5]), before);
+}
