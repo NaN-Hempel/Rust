@@ -4,6 +4,7 @@
 
 use crate::code::math::Matrix;
 
+#[allow(dead_code)] // the XOR demo doesn't use them all
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Activation {
     Identity, // f(z) = z

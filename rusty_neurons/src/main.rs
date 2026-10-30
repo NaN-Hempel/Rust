@@ -1,9 +1,11 @@
+mod code;
+mod data;
+
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use rusty_neurons::code::fncts::Activation;
-use rusty_neurons::code::network::Network;
-use rusty_neurons::data;
+use code::fncts::Activation;
+use code::network::Network;
 
 const EPOCHS: usize = 5000;
 const LEARNING_RATE: f64 = 1.0;
