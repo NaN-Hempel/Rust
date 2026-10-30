@@ -28,10 +28,6 @@ pub struct Simulation {
     velocities: Vec<Vec3>,
     acc: Vec<Vec3>,
     pub particles: Particles,
-    // Bodies that follow a path worked out beforehand (like a probe flown by probe::flight)
-    // instead of being moved by gravity: each one's index into planets, and its position and
-    // velocity at a given time. They pull on nothing.
-    scripted: Vec<(usize, Box<dyn Fn(f64) -> (Vec3, Vec3)>)>,
 }
 
 pub fn new_simulation(planets: Vec<Planet>, n: usize, dt: f64) -> Simulation {
@@ -47,7 +43,6 @@ pub fn with_test_particle_mass(planets: Vec<Planet>, n: usize, dt: f64, threshol
     Simulation {
         particles: Particles::new(light, &planets, &mu, &positions, &velocities, dt),
         acc: vec![Vec3::ZERO; massive.len()],
-        scripted: Vec::new(),
         massive,
         mu,
         positions,
@@ -62,13 +57,6 @@ impl Simulation {
     // Number of bodies whose gravity is simulated; the rest are test particles.
     pub fn massive_count(&self) -> usize {
         self.massive.len()
-    }
-
-    // Adds body, to follow track (its position and velocity at each simulated time) rather than gravity.
-    pub fn add_scripted(&mut self, mut body: Planet, track: impl Fn(f64) -> (Vec3, Vec3) + 'static) {
-        (body.position, body.velocity) = track(self.time());
-        self.scripted.push((self.planets.len(), Box::new(track)));
-        self.planets.push(body);
     }
 
     // Brings the test particles in planets up to the current time. They only step every so often,
@@ -141,10 +129,6 @@ pub fn update_simulation(sim: &mut Simulation, dt: f64) {
         sim.planets[i].velocity = sim.velocities[k];
     }
     sim.particles.advance(&sim.mu, &sim.positions, &sim.velocities, dt, &mut sim.planets);
-    let time = sim.time();
-    for (i, track) in &sim.scripted {
-        (sim.planets[*i].position, sim.planets[*i].velocity) = track(time);
-    }
 }
 
 // Advances the simulation n steps of dt seconds each. Only the tests use it.

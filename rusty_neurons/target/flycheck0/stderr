@@ -1,4 +1,2 @@
     Blocking waiting for file lock on package cache
-    Blocking waiting for file lock on package cache
-    Checking rusty_neurons v0.1.0 (/Users/nannehempel/Documents/Programming/Rust/rusty_neurons)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
